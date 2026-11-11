@@ -99,14 +99,9 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager --install \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools"
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
 
       - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -125,7 +120,7 @@ jobs:
             mkdir -p app
             printf '%s' "$FIREBASE_CONFIG" |
               base64 --decode > app/google-services.json
-            python -m json.tool app/google-services.json > /dev/null
+            python3 -m json.tool app/google-services.json > /dev/null
             echo "Firebase configured."
           else
             echo "Firebase not configured. Offline build."
