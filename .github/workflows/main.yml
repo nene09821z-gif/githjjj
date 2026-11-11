@@ -1,4 +1,3 @@
-
 name: ChessPlus Android - Build APK and ZIP
 
 on:
@@ -26,24 +25,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find Android project root
+      - name: Extract ZIP and find Android project
         id: project
         shell: bash
         run: |
           set -euo pipefail
+
+          mkdir -p .ci-source
+
+          ARCHIVE="$(find . -maxdepth 3 -type f \
+            -iname 'ChessPlus-Android*.zip' \
+            -not -path './.git/*' \
+            -not -path './.ci-source/*' \
+            -print -quit || true)"
+
+          if [[ -n "$ARCHIVE" ]]; then
+            echo "Extracting: $ARCHIVE"
+            unzip -oq "$ARCHIVE" -d .ci-source
+          fi
+
           PROJECT_DIR=""
 
-          for candidate in "." "ChessPlus" "app"; do
-            if [[ -f "$candidate/settings.gradle.kts" || -f "$candidate/settings.gradle" ]]; then
+          for candidate in \
+            "." \
+            "ChessPlus" \
+            ".ci-source" \
+            ".ci-source/ChessPlus" \
+            ".ci-source/ChessPlus-Android" \
+            ".ci-source/ChessPlus-Android/Source"
+          do
+            if [[ -f "$candidate/settings.gradle.kts" || \
+                  -f "$candidate/settings.gradle" ]]; then
               PROJECT_DIR="$candidate"
               break
             fi
           done
 
           if [[ -z "$PROJECT_DIR" ]]; then
-            SETTINGS_FILE="$(find . -maxdepth 5 -type f \
+            SETTINGS_FILE="$(find . -maxdepth 12 -type f \
               \( -name settings.gradle.kts -o -name settings.gradle \) \
-              -not -path '*/.gradle/*' -print -quit)"
+              -not -path './.git/*' \
+              -not -path '*/.gradle/*' \
+              -not -path '*/build/*' \
+              -print -quit || true)"
 
             if [[ -n "$SETTINGS_FILE" ]]; then
               PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
@@ -51,14 +75,21 @@ jobs:
           fi
 
           if [[ -z "$PROJECT_DIR" ]]; then
-            echo "ERROR: settings.gradle(.kts) not found." >&2
-            echo "Upload the contents of the ChessPlus folder." >&2
-            find . -maxdepth 4 -type f | sort | head -200 >&2
+            echo "::error::Cannot find settings.gradle or settings.gradle.kts"
+            echo "Repository files:"
+            find . -maxdepth 6 -type f \
+              -not -path './.git/*' | sort | head -250
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" && \
+                ! -f "$PROJECT_DIR/app/build.gradle" ]]; then
+            echo "::error::Android app module not found."
             exit 1
           fi
 
           echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Android project root: $PROJECT_DIR"
+          echo "Project root: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
       - name: Set up JDK 17
@@ -82,44 +113,46 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Configure Firebase (optional)
+      - name: Configure Firebase
         working-directory: ${{ steps.project.outputs.dir }}
         env:
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          FIREBASE_CONFIG: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -n "${GOOGLE_SERVICES_JSON_BASE64:-}" ]]; then
-            printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" |
+          if [[ -n "${FIREBASE_CONFIG:-}" ]]; then
+            mkdir -p app
+            printf '%s' "$FIREBASE_CONFIG" |
               base64 --decode > app/google-services.json
-
             python -m json.tool app/google-services.json > /dev/null
-            echo "Firebase configuration loaded."
+            echo "Firebase configured."
           else
-            echo "Building without Firebase configuration."
+            echo "Firebase not configured. Offline build."
           fi
 
       - name: Run unit tests
         working-directory: ${{ steps.project.outputs.dir }}
-        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest
+        run: |
+          gradle --no-daemon --stacktrace :app:testDebugUnitTest
 
       - name: Build debug APK
         working-directory: ${{ steps.project.outputs.dir }}
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: |
+          gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: Package APK and source ZIP
+      - name: Verify and package APK
         working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
         run: |
           set -euo pipefail
 
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          test -s "$APK_PATH" || {
-            echo "APK not found: $APK_PATH" >&2
+          if [[ ! -s "$APK" ]]; then
+            echo "::error::APK was not generated."
             exit 1
-          }
+          fi
 
           rm -rf release ChessPlus-Android.zip
 
@@ -135,23 +168,25 @@ jobs:
             --exclude='/app/google-services.json' \
             --exclude='**/local.properties'
 
-          cp "$APK_PATH" \
+          cp "$APK" \
             release/ChessPlus-Android/APK/ChessPlus-debug.apk
 
-          [[ ! -f README.md ]] || \
+          if [[ -f README.md ]]; then
             cp README.md release/ChessPlus-Android/
+          fi
 
-          [[ ! -f BUILDING.md ]] || \
+          if [[ -f BUILDING.md ]]; then
             cp BUILDING.md release/ChessPlus-Android/
+          fi
 
           {
             echo "Project: ChessPlus Android"
             echo "Application ID: com.example.chessplus"
-            echo "Build type: debug"
+            echo "Build type: Debug"
             echo "Commit: ${GITHUB_SHA}"
-            echo "Ref: ${GITHUB_REF}"
+            echo "Branch: ${GITHUB_REF_NAME}"
             echo "Run: ${GITHUB_RUN_NUMBER}"
-            echo "Built UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "Built: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           } > release/ChessPlus-Android/BUILD_INFO.txt
 
           (
@@ -164,9 +199,11 @@ jobs:
             zip -qr -9 ../ChessPlus-Android.zip ChessPlus-Android
           )
 
-          ls -lh ChessPlus-Android.zip "$APK_PATH"
+          test -s ChessPlus-Android.zip
 
-      - name: Upload ZIP (APK + source)
+          ls -lh "$APK" ChessPlus-Android.zip
+
+      - name: Upload complete ZIP
         uses: actions/upload-artifact@v4
         with:
           name: ChessPlus-Android-ZIP
@@ -181,4 +218,3 @@ jobs:
           path: ${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
-          
